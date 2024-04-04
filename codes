@@ -1,0 +1,74 @@
+zcat FL_WT1_HSC_S1_R1.fastq.gz FL_WT1_HSC_S7_R1.fastq.gz > concat_FL_WT1_HSC_1.fastq
+zcat FL_WT1_HSC_S1_R2.fastq.gz FL_WT1_HSC_S7_R2.fastq.gz > concat_FL_WT1_HSC_2.fastq
+
+zcat FL_WT2_HSC_S2_R1.fastq.gz FL_WT2_HSC_S8_R1.fastq.gz > concat_FL_WT2_HSC_1.fastq
+zcat FL_WT2_HSC_S2_R2.fastq.gz FL_WT2_HSC_S8_R2.fastq.gz > concat_FL_WT2_HSC_2.fastq
+
+zcat FL_WT3_HSC_S3_R1.fastq.gz FL_WT3_HSC_S9_R1.fastq.gz > concat_FL_WT3_HSC_1.fastq
+zcat FL_WT3_HSC_S3_R2.fastq.gz FL_WT3_HSC_S9_R2.fastq.gz > concat_FL_WT3_HSC_2.fastq
+
+zcat FL_cKO1_HSC_S4_R1.fastq.gz FL_cKO1_HSC_S10_R1.fastq.gz > concat_FL_cKO1_HSC_1.fastq
+zcat FL_cKO1_HSC_S4_R2.fastq.gz FL_cKO1_HSC_S10_R2.fastq.gz > concat_FL_cKO1_HSC_2.fastq
+
+zcat FL_cKO2_HSC_S5_R1.fastq.gz FL_cKO2_HSC_S11_R1.fastq.gz > concat_FL_cKO2_HSC_1.fastq
+zcat FL_cKO2_HSC_S5_R2.fastq.gz FL_cKO2_HSC_S11_R2.fastq.gz > concat_FL_cKO2_HSC_2.fastq
+
+zcat FL_cKO3_HSC_S6_R1.fastq.gz FL_cKO3_HSC_S12_R1.fastq.gz > concat_FL_cKO3_HSC_1.fastq
+zcat FL_cKO3_HSC_S6_R2.fastq.gz FL_cKO3_HSC_S12_R2.fastq.gz > concat_FL_cKO3_HSC_2.fastq
+
+pigz *.fastq
+
+# ikra v2.0.1
+ikra ikra_input.csv mouse -pc --threads 20 -a star --fastq -s1 _1.fastq.gz -s2 _2.fastq.gz
+
+# alignment
+cd ~/reference/Gencode_vM24
+ulimit -n 3000
+
+/home/yyasumizu/Programs/STAR-2.7.9a/bin/Linux_x86_64/STAR --runMode genomeGenerate --genomeDir STAR_index_leafcutter/ --genomeFastaFiles GRCm38.p6.genome.fa --sjdbGTFfile gencode.vM24.annotation.gtf --sjdbOverhang 100
+pigz gencode.vM24.annotation.gtf
+gtf_to_exons.R gencode.vM24.annotation.gtf.gz gencode.vM24.exons.txt.gz
+
+cat samples.txt | while read line; do
+if [[ ! -f "${line}_Aligned.out.bam" ]]; then
+/home/yyasumizu/Programs/STAR-2.7.9a/bin/Linux_x86_64/STAR \
+--readFilesIn ${line}_1.fastq.gz ${line}_2.fastq.gz --runThreadN 12 \
+--outFileNamePrefix ${line}_ \
+--genomeDir ~/reference/Gencode_vM24/STAR_index_leafcutter \
+--twopassMode Basic --outSAMstrandField intronMotif \
+--readFilesCommand zcat --outSAMtype BAM Unsorted
+fi
+done
+
+cat samples.txt | while read line; do
+if [[ ! -f "${line}_Aligned.out.sorted.bam" ]]; then
+sambamba sort ${line}_Aligned.out.bam
+fi
+done
+
+# -s INT  Strand specificity of RNA library preparation (0 = unstranded, 1 = first-strand/RF, 2, = second-strand/FR). REQUIRED
+for bamfile in `ls concat_*.sorted.bam`; do
+    echo Converting $bamfile to $bamfile.junc
+    # samtools index $bamfile
+    regtools junctions extract -a 8 -m 50 -M 500000 -o $bamfile.junc -s 0 $bamfile
+    echo $bamfile.junc >> juncfiles.txt
+done
+
+python2 /home/yyasumizu/Programs/leafcutter/clustering/leafcutter_cluster_regtools.py -j juncfiles.txt -m 50 -o leafcutter -l 500000 --checkchrom --strand=False
+
+cp ~/reference/Gencode_vM24/gencode.vM24.exons.txt.gz .
+docker run -v ${PWD}:/opt/leafcutter/leafcutter/leafcutter stephanholgerdrukewitz/leafcutter Rscript /opt/leafcutter/leafcutter/scripts/leafcutter_ds.R --num_threads 16 -e gencode.vM24.exons.txt.gz leafcutter_perind_numers.counts.gz groups_file.txt -i 3
+
+docker run -v ${PWD}:/opt/leafcutter/leafcutter/leafcutter stephanholgerdrukewitz/leafcutter Rscript /opt/leafcutter/leafcutter/scripts/ds_plots.R -e gencode.v31.exons.txt.gz leafcutter_perind_numers.counts.gz groups_file.txt leafcutter_ds_cluster_significance.txt -f 0.05
+
+# gencode_hg38 downloaded by the script did not contain gene names
+# cd ~/Programs/leafcutter/leafviz
+# ./download_human_annotation_codes.sh
+# cd -
+# cp -r ~/Programs/leafcutter/leafviz/annotation_codes/gencode_hg38 .
+
+cp ~/reference/Gencode_vM24/gencode.vM24.annotation.gtf .
+docker run -v ${PWD}:/opt/leafcutter/leafcutter/leafcutter stephanholgerdrukewitz/leafcutter perl /opt/leafcutter/leafcutter/leafviz/gtf2leafcutter.pl -o gencode_vM24_mm10 \
+gencode.vM24.annotation.gtf
+
+docker run -v ${PWD}:/opt/leafcutter/leafcutter/leafcutter stephanholgerdrukewitz/leafcutter Rscript /opt/leafcutter/leafcutter/leafviz/prepare_results.R leafcutter_perind_numers.counts.gz leafcutter_ds_cluster_significance.txt leafcutter_ds_effect_sizes.txt gencode_vM24_mm10 --meta_data_file groups_file.txt
